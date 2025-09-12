@@ -11,12 +11,32 @@
 		"nodejs_compat",
 		"global_fetch_strictly_public"
 	],
+	"minify": true,
 	"assets": {
 		"binding": "ASSETS",
 		"directory": ".open-next/assets"
 	},
 	"observability": {
 		"enabled": true
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "url-shortener-dev",
+			"database_id": "e7bb2407-c2ab-426e-baa1-94d8cd03ddc6",
+			"preview_database_id": "DB"
+		}
+	],
+	"env": {
+		"production": {
+			"d1_databases": [
+				{
+					"binding": "DB",
+					"database_name": "url-shortener-prod",
+					"database_id": "57b5e888-c13c-47df-b5c6-5ed5b5928601"
+				}
+			]
+		}
 	}
 	/**
 	 * Smart Placement
