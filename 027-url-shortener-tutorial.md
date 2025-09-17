@@ -10,7 +10,7 @@
 - **実行環境**: Cloudflare Workers（OpenNext Cloudflare アダプタ）
 - **認証**: BetterAuth（Edge 対応）
 - **ORM**: Drizzle ORM（D1/SQLite）
-- **データベース**: Cloudflare D1
+- **データベース**: Cloudflare D1（単一 DB。ローカルは `--local` で実行）
 - **UI**: Tailwind CSS v4（モバイルファースト）
 - **CLI**: Wrangler v4
 - **ビルド/デプロイ**: `@opennextjs/cloudflare`（`opennextjs-cloudflare build/deploy/preview`）
@@ -42,8 +42,7 @@
 npm i -g wrangler
 wrangler login
 
-# データベース作成
-wrangler d1 create url-shortener-dev
+# データベース作成（単一）
 wrangler d1 create url-shortener-prod
 ```
 
@@ -51,26 +50,14 @@ wrangler d1 create url-shortener-prod
 
 ```jsonc
 {
-  // 既存設定のまま、追記します
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "url-shortener-dev",
-      "database_id": "<DEV_DB_ID>", // wrangler d1 info で確認
-      "preview_database_id": "DB" // Pages/preview互換のための指定（Workers開発にも有用）
+      "database_name": "url-shortener-prod",
+      "database_id": "<PROD_DB_ID>", // wrangler d1 info で確認
+      "preview_database_id": "DB" // ローカル/プレビュー実行用
     }
-  ],
-  "env": {
-    "production": {
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "url-shortener-prod",
-          "database_id": "<PROD_DB_ID>"
-        }
-      ]
-    }
-  }
+  ]
 }
 ```
 
@@ -100,7 +87,7 @@ Cloudflare D1 は SQLite 互換です。`drizzle-kit` で SQL を生成し、Wra
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({
-  schema: "./src/db/schema.ts",
+  schema: ["./src/db/schema.ts", "./src/db/auth-schema.ts"],
   out: "./migrations", // D1のマイグレーション適用先
   dialect: "sqlite",
 });
@@ -125,17 +112,102 @@ export const links = sqliteTable("links", {
 });
 ```
 
+### 2-3. 認証用スキーマ（`src/db/auth-schema.ts`）
+
+Better Auth が利用する `user`/`session`/`account`/`verification` の最小スキーマを追加します（SQLite/D1）。
+
+```typescript
+// src/db/auth-schema.ts
+import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+
+export const user = sqliteTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  email: text("email").notNull().unique(),
+  emailVerified: integer("email_verified", { mode: "boolean" })
+    .default(false)
+    .notNull(),
+  image: text("image"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .defaultNow()
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+
+export const session = sqliteTable("session", {
+  id: text("id").primaryKey(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  token: text("token").notNull().unique(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .defaultNow()
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+});
+
+export const account = sqliteTable("account", {
+  id: text("id").primaryKey(),
+  accountId: text("account_id").notNull(),
+  providerId: text("provider_id").notNull(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  accessToken: text("access_token"),
+  refreshToken: text("refresh_token"),
+  idToken: text("id_token"),
+  accessTokenExpiresAt: integer("access_token_expires_at", {
+    mode: "timestamp",
+  }),
+  refreshTokenExpiresAt: integer("refresh_token_expires_at", {
+    mode: "timestamp",
+  }),
+  scope: text("scope"),
+  password: text("password"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .defaultNow()
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+
+export const verification = sqliteTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .defaultNow()
+    .notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .defaultNow()
+    .$onUpdate(() => new Date())
+    .notNull(),
+});
+```
+
 ### 2-4. マイグレーション生成と適用
 
 ```bash
 # 生成（./migrations に SQL が出力されます）
 npx drizzle-kit generate
 
-# ローカルDBへ適用（フォルダ単位で適用）
-wrangler d1 migrations apply url-shortener-dev --local
+# ローカル適用（単一DBを --local で実行）
+wrangler d1 migrations apply url-shortener-prod --local
 
-# 本番DBへ適用（--env production を付与）
-wrangler d1 migrations apply url-shortener-prod --remote --env production
+# 本番適用（リモート）
+wrangler d1 migrations apply url-shortener-prod --remote
 ```
 
 ---
@@ -181,71 +253,78 @@ npm install better-auth
 GitHub OAuth などのクレデンシャルと `BETTERAUTH_SECRET` を Secrets に登録します。ローカル開発では `.dev.vars`（このリポジトリに同梱）に同名キーを記述して使います。
 
 ```bash
-# 本番用
-wrangler secret put BETTERAUTH_SECRET --env production
-wrangler secret put GITHUB_CLIENT_ID --env production
-wrangler secret put GITHUB_CLIENT_SECRET --env production
+# 本番用シークレット（単一サービスに設定）
+wrangler secret put BETTERAUTH_SECRET --name 027-url-shortener
+wrangler secret put GITHUB_CLIENT_ID --name 027-url-shortener
+wrangler secret put GITHUB_CLIENT_SECRET --name 027-url-shortener
 ```
 
-### 4-3. 認証 API ルート（`app/api/auth/[...betterauth]/route.ts`）
+GitHub OAuth アプリのリダイレクト URL に「`https://<YOUR_DOMAIN>/api/auth/callback/github`」とローカル用「`http://localhost:3000/api/auth/callback/github`」を登録してください。
 
-```typescript
-// app/api/auth/[...betterauth]/route.ts
-import { BetterAuth } from "better-auth";
-import GitHub from "better-auth/providers/github";
+### 4-3. サーバー側の認証インスタンス（`src/lib/auth.ts`）
+
+Better Auth を Drizzle（D1）に接続し、スキーマを渡します。`baseURL` は実行オリジンに合わせてください。
+
+```ts
+// src/lib/auth.ts
+import { betterAuth } from "better-auth";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { drizzle } from "drizzle-orm/d1";
+import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import * as appSchema from "@/db/schema";
+import * as authSchema from "@/db/auth-schema";
 
-export const runtime = "edge"; // Workers 実行を明示
+let singleton: ReturnType<typeof betterAuth> | null = null;
 
-const { env } = getCloudflareContext<{ env: CloudflareEnv }>();
+export function auth() {
+  if (singleton) return singleton;
+  const { env } = getCloudflareContext<{ env: CloudflareEnv }>();
+  const appUrl = env.APP_URL || "http://localhost:3000";
 
-export const { handlers, auth, signIn, signOut } = BetterAuth({
-  secret: env.BETTERAUTH_SECRET,
-  providers: [
-    GitHub({
-      clientId: env.GITHUB_CLIENT_ID,
-      clientSecret: env.GITHUB_CLIENT_SECRET,
-    }),
-  ],
-});
+  const db = drizzle(env.DB, { schema: { ...authSchema, ...appSchema } });
 
-// Route Handler としてエクスポート
-export const { GET, POST } = handlers;
+  singleton = betterAuth({
+    database: drizzleAdapter(db, { provider: "sqlite", schema: authSchema }),
+    baseURL: appUrl,
+    cookies: { secure: appUrl.startsWith("https://") },
+    secret: env.BETTERAUTH_SECRET,
+    socialProviders: {
+      github: {
+        clientId: env.GITHUB_CLIENT_ID as string,
+        clientSecret: env.GITHUB_CLIENT_SECRET as string,
+      },
+    },
+  });
+  return singleton;
+}
 ```
 
-### 4-4. 認証ボタン（Server Action）
+### 4-4. 認証 API ルート（`app/api/auth/[...all]/route.ts`）
+
+```ts
+// app/api/auth/[...all]/route.ts
+import { toNextJsHandler } from "better-auth/next-js";
+import { auth } from "@/lib/auth";
+
+export const runtime = "edge";
+export const { GET, POST } = toNextJsHandler(auth().handler);
+```
+
+### 4-4. 認証ボタン（Client 推奨）
 
 ```tsx
 // components/auth-buttons.tsx
-import { auth, signIn, signOut } from "@/app/api/auth/[...betterauth]/route";
+"use client";
+import { createAuthClient } from "better-auth/react";
+const authClient = createAuthClient();
 
-export async function AuthButtons() {
-  const session = await auth();
-
-  if (!session?.user) {
-    return (
-      <form
-        action={async () => {
-          "use server";
-          await signIn("github");
-        }}
-      >
-        <button type="submit">Sign in with GitHub</button>
-      </form>
-    );
-  }
-
+export function AuthButtons() {
   return (
-    <div>
-      <p>{session.user.email}</p>
-      <form
-        action={async () => {
-          "use server";
-          await signOut();
-        }}
-      >
-        <button type="submit">Sign Out</button>
-      </form>
+    <div className="flex gap-3">
+      <button onClick={() => authClient.signIn.social({ provider: "github" })}>
+        Sign in with GitHub
+      </button>
+      <button onClick={() => authClient.signOut()}>Sign Out</button>
     </div>
   );
 }
@@ -255,20 +334,21 @@ export async function AuthButtons() {
 
 ## 5. アプリ機能の実装（URL 作成とリダイレクト）
 
-### 5-1. 短縮 URL を作成する Server Action（`app/actions.ts`）
+### 5-1. 短縮 URL を作成する Server Action（`app/action.ts`）
 
 ```typescript
-// app/actions.ts
+// app/action.ts
 "use server";
 
+import { headers } from "next/headers";
 import { getDbFromEnv } from "@/db";
 import { links } from "@/db/schema";
-import { auth } from "@/app/api/auth/[...betterauth]/route";
+import { auth } from "@/lib/auth";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
 
 export async function createShortLink(_prev: unknown, formData: FormData) {
-  const session = await auth();
+  const session = await auth().api.getSession({ headers: await headers() });
   if (!session?.user?.id) return { message: "認証が必要です。" };
 
   const url = String(formData.get("url") || "").trim();
@@ -308,19 +388,107 @@ export const runtime = "edge"; // リダイレクトもWorkersで
 export default async function ShortIdPage({
   params,
 }: {
-  params: { shortId: string };
+  params: Promise<{ shortId: string }>;
 }) {
   const db = getDbFromEnv();
+  const { shortId } = await params;
   const result = await db
     .select()
     .from(links)
-    .where(eq(links.shortId, params.shortId));
+    .where(eq(links.shortId, shortId));
   const link = result[0];
 
   if (link) redirect(link.originalUrl);
   notFound();
 }
 ```
+
+### 5-3. メインページ（ベストプラクティス構成）
+
+- ページ本体（`app/page.tsx`）は Server Component のまま維持し、Client が必要な箇所だけを別ファイルへ分離します。
+- Client Component はファイル先頭に`"use client"`を配置し、`useFormState`/`useFormStatus`を安全に利用します。
+
+#### 5-3-1. 送信ボタン（`app/components/SubmitButton.tsx`）
+
+```tsx
+// app/components/SubmitButton.tsx
+"use client";
+import { useFormStatus } from "react-dom";
+
+export function SubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      className="rounded-md bg-black text-white px-4 py-2 disabled:opacity-50"
+    >
+      {pending ? "生成中..." : "短縮URLを作成"}
+    </button>
+  );
+}
+```
+
+#### 5-3-2. フォーム（`app/components/ShortenForm.tsx`）
+
+```tsx
+// app/components/ShortenForm.tsx
+"use client";
+import { useFormState } from "react-dom";
+import { createShortLink } from "@/app/action";
+import { SubmitButton } from "./SubmitButton";
+
+export function ShortenForm() {
+  const [state, formAction] = useFormState(createShortLink, {
+    message: "",
+  } as any);
+  const shortHref = state?.shortId ? `/${state.shortId}` : "";
+
+  return (
+    <form action={formAction} className="flex w-full max-w-xl flex-col gap-3">
+      <input
+        name="url"
+        type="url"
+        required
+        placeholder="https://example.com/article"
+        className="w-full rounded-md border px-3 py-2"
+      />
+      <SubmitButton />
+      {state?.message && (
+        <p className="text-sm text-gray-600">{state.message}</p>
+      )}
+      {state?.shortId && (
+        <p className="text-sm">
+          短縮URL:{" "}
+          <a className="text-blue-600 underline" href={shortHref}>
+            {shortHref}
+          </a>
+        </p>
+      )}
+    </form>
+  );
+}
+```
+
+#### 5-3-3. ページ本体（`app/page.tsx`）
+
+```tsx
+// app/page.tsx
+import { AuthButtons } from "@/components/auth-buttons";
+import { ShortenForm } from "./components/ShortenForm";
+
+export default function Page() {
+  return (
+    <div className="mx-auto flex min-h-[70vh] max-w-3xl flex-col items-center gap-8 p-6 sm:p-10">
+      <h1 className="text-2xl font-semibold">URL 短縮サービス</h1>
+      <AuthButtons />
+      <ShortenForm />
+    </div>
+  );
+}
+```
+
+- 注意: `page.tsx`では`useFormState`/`useFormStatus`などの Client Hooks を import しないでください（Server Component のままにするため）。
 
 ---
 
@@ -331,8 +499,8 @@ export default async function ShortIdPage({
 ```bash
 npm run dev
 
-# スキーマ更新時はローカルDBへ反映
-wrangler d1 migrations apply url-shortener-dev --local
+# スキーマ更新時はローカルDBへ反映（単一DBを --local で）
+wrangler d1 migrations apply url-shortener-prod --local
 ```
 
 開発中に Cloudflare 環境値・D1 バインディングにアクセスする場合、`getCloudflareContext()` を利用します。
@@ -340,9 +508,9 @@ wrangler d1 migrations apply url-shortener-dev --local
 ### 6-2. Secrets の登録（本番）
 
 ```bash
-wrangler secret put BETTERAUTH_SECRET --env production
-wrangler secret put GITHUB_CLIENT_ID --env production
-wrangler secret put GITHUB_CLIENT_SECRET --env production
+wrangler secret put BETTERAUTH_SECRET --name 027-url-shortener
+wrangler secret put GITHUB_CLIENT_ID --name 027-url-shortener
+wrangler secret put GITHUB_CLIENT_SECRET --name 027-url-shortener
 ```
 
 ### 6-3. デプロイ（OpenNext Cloudflare）
@@ -355,7 +523,7 @@ npm run deploy   # 本番デプロイ
 デプロイ後、D1 スキーマを本番へ適用：
 
 ```bash
-wrangler d1 migrations apply url-shortener-prod --remote --env production
+wrangler d1 migrations apply url-shortener-prod --remote
 ```
 
 ---
@@ -364,8 +532,10 @@ wrangler d1 migrations apply url-shortener-prod --remote --env production
 
 - **Edge/Workers 対応**: `export const runtime = "edge"` を Route/ページに明示。Node API 依存は避け、`nodejs_compat` は必要最小限
 - **環境変数/Secrets**: `process.env` ではなく Cloudflare の Bindings/Secrets を使用（`getCloudflareContext().env`）。ローカルは `.dev.vars`
+- **OAuth 設定**: GitHub のコールバック URL を`/api/auth/callback/github`に設定（ローカル/本番）
+- **Next.js 導入**: App Router では `toNextJsHandler(auth.handler)` のエクスポートが推奨
 - **型安全**: `wrangler types` で生成された `CloudflareEnv` を使い、`getCloudflareContext<{ env: CloudflareEnv }>()` で活用
-- **マイグレーション運用**: 開発は `--local`、本番は `--remote`＋`--env production` で適用
+- **マイグレーション運用**: 単一 DB に対して、開発は `--local`、本番は `--remote` で適用
 - **UI/UX**: Tailwind v4 をモバイルファーストで適用（シンプルでモダンな UI）
 
 ---
@@ -375,11 +545,11 @@ wrangler d1 migrations apply url-shortener-prod --remote --env production
 - **OpenNext Cloudflare**: `/opennextjs/opennextjs-cloudflare`
 - **Cloudflare D1**: `/llmstxt/developers_cloudflare_com-d1-llms-full.txt`
 - **Drizzle ORM**: `/drizzle-team/drizzle-orm-docs`
-- **BetterAuth**: `/websites/www_better-auth_com-docs-introduction`
+- **BetterAuth（Next.js App Router）**: `/better-auth/better-auth` の Next.js セクション
 - **Next.js**: `/vercel/next.js`
 
 ---
 
 ## 結び
 
-本チュートリアルは、OpenNext×Cloudflare Workers を前提に、D1・Drizzle・BetterAuth を最新の推奨構成で統合しました。開発（`next dev`）から本番デプロイ（`npm run deploy`）までのパスと、D1 マイグレーションの運用、Edge ランタイムでの Secrets 参照方法を一通り学べます。ここから短縮 URL の分析やメタデータ拡張、レート制御、ダッシュボード UI などを拡張して、プロダクション品質に磨き込んでいきましょう。
+本チュートリアルは、OpenNext×Cloudflare Workers を前提に、D1・Drizzle・BetterAuth を最新の推奨構成で統合しました。単一 D1 に統一し、開発は `--local`、本番は `--remote` の運用で安全・シンプルに管理できます。ここから短縮 URL の分析やメタデータ拡張、レート制御、ダッシュボード UI などを拡張して、プロダクション品質に磨き込んでいきましょう。
