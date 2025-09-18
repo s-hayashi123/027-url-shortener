@@ -263,7 +263,7 @@ GitHub OAuth アプリのリダイレクト URL に「`https://<YOUR_DOMAIN>/api
 
 ### 4-3. サーバー側の認証インスタンス（`src/lib/auth.ts`）
 
-Better Auth を Drizzle（D1）に接続し、スキーマを渡します。`baseURL` は実行オリジンに合わせてください。
+Better Auth を Drizzle（D1）に接続し、スキーマを渡します。`baseURL` は実行オリジンに合わせてください。`getCloudflareContext({ async: true })` を使ってビルド時評価を避けます。
 
 ```ts
 // src/lib/auth.ts
@@ -276,9 +276,11 @@ import * as authSchema from "@/db/auth-schema";
 
 let singleton: ReturnType<typeof betterAuth> | null = null;
 
-export function auth() {
+export async function auth() {
   if (singleton) return singleton;
-  const { env } = getCloudflareContext<{ env: CloudflareEnv }>();
+  const { env } = await getCloudflareContext<{ env: CloudflareEnv }>({
+    async: true,
+  });
   const appUrl = env.APP_URL || "http://localhost:3000";
 
   const db = drizzle(env.DB, { schema: { ...authSchema, ...appSchema } });
@@ -303,11 +305,15 @@ export function auth() {
 
 ```ts
 // app/api/auth/[...all]/route.ts
-import { toNextJsHandler } from "better-auth/next-js";
 import { auth } from "@/lib/auth";
 
-export const runtime = "edge";
-export const { GET, POST } = toNextJsHandler(auth().handler);
+export async function GET(request: Request) {
+  return (await auth()).handler(request);
+}
+
+export async function POST(request: Request) {
+  return (await auth()).handler(request);
+}
 ```
 
 ### 4-4. 認証ボタン（Client 推奨）
@@ -382,8 +388,6 @@ import { redirect, notFound } from "next/navigation";
 import { getDbFromEnv } from "@/db";
 import { links } from "@/db/schema";
 import { eq } from "drizzle-orm";
-
-export const runtime = "edge"; // リダイレクトもWorkersで
 
 export default async function ShortIdPage({
   params,

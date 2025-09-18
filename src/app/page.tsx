@@ -2,6 +2,9 @@ import { AuthButtons } from "@/components/auth-buttons";
 import { ShortenForm } from "./components/ShortenForm";
 import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
+import { getDbFromEnv } from "@/db";
+import { links } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
 
 export default async function Page() {
   const session = await (
@@ -14,6 +17,31 @@ export default async function Page() {
     (session?.user?.id as string | undefined) ??
     "";
   const label = isSignedIn ? `サインイン中: ${who}` : "未サインイン";
+
+  // 直近作成した短縮リンク一覧（サインイン時のみ）
+  let myLinks:
+    | {
+        id: number;
+        shortId: string;
+        originalUrl: string | null;
+        userId: string | null;
+      }[]
+    | [] = [];
+  if (isSignedIn) {
+    const db = getDbFromEnv();
+    const userId =
+      (session!.user.id as string | undefined) ||
+      (session!.user.email as string | undefined) ||
+      "";
+    if (userId) {
+      myLinks = await db
+        .select()
+        .from(links)
+        .where(eq(links.userId, userId))
+        .orderBy(desc(links.id))
+        .limit(10);
+    }
+  }
 
   return (
     <div className="mx-auto flex min-h-[70vh] max-w-3xl flex-col items-center gap-8 p-6 sm:p-10">
@@ -39,6 +67,30 @@ export default async function Page() {
       )}
 
       <ShortenForm disabled={!isSignedIn} />
+
+      {isSignedIn && myLinks.length > 0 && (
+        <div className="w-full max-w-xl">
+          <h2 className="mb-2 text-sm font-medium text-gray-700">
+            最近作成したリンク
+          </h2>
+          <ul className="flex flex-col gap-1">
+            {myLinks.map((l) => (
+              <li
+                key={l.id}
+                className="flex items-center justify-between gap-3 truncate"
+              >
+                <a
+                  className="text-blue-600 underline"
+                  href={`/${l.shortId}`}
+                >{`/${l.shortId}`}</a>
+                <span className="truncate text-sm text-gray-600">
+                  {l.originalUrl}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

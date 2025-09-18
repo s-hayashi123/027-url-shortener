@@ -19,6 +19,9 @@
 	"observability": {
 		"enabled": true
 	},
+	"vars": { 
+		"APP_URL": "https://027-url-shortener.shake7602.workers.dev" 
+	},
 	"d1_databases": [
 		{
 			"binding": "DB",
